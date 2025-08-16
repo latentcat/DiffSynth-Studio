@@ -421,6 +421,8 @@ def launch_training_task(
     num_epochs: int = 1,
     gradient_accumulation_steps: int = 1,
     find_unused_parameters: bool = False,
+    use_swanlab: bool = False,
+    swanlab_mode: str = None,
 ):
     dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, collate_fn=lambda x: x[0], num_workers=num_workers)
     accelerator = Accelerator(
@@ -429,18 +431,76 @@ def launch_training_task(
     )
     model, optimizer, dataloader, scheduler = accelerator.prepare(model, optimizer, dataloader, scheduler)
     
+    # Initialize SwanLab if enabled
+    swanlab_logger = None
+    if use_swanlab and accelerator.is_main_process:
+        try:
+            import swanlab
+            swanlab_logger = swanlab
+            swanlab.init(
+                project="qwen-cn-edit",
+                config={
+                    "learning_rate": optimizer.param_groups[0]['lr'],
+                    "num_epochs": num_epochs,
+                    "gradient_accumulation_steps": gradient_accumulation_steps,
+                },
+                mode=swanlab_mode,
+            )
+        except ImportError:
+            print("SwanLab not installed. Please install it with: pip install swanlab")
+            swanlab_logger = None
+    
+    global_step = 0
     for epoch_id in range(num_epochs):
-        for data in tqdm(dataloader):
+        epoch_loss = 0.0
+        num_batches = 0
+        for data in tqdm(dataloader, desc=f"Epoch {epoch_id+1}/{num_epochs}"):
             with accelerator.accumulate(model):
                 optimizer.zero_grad()
                 loss = model(data)
                 accelerator.backward(loss)
                 optimizer.step()
+                
+                # Gather loss for logging
+                loss_value = accelerator.gather(loss).mean().item()
+                epoch_loss += loss_value
+                num_batches += 1
+                global_step += 1
+                
+                # Log to SwanLab
+                if swanlab_logger and accelerator.is_main_process:
+                    swanlab_logger.log({
+                        "train_loss": loss_value,
+                        "learning_rate": optimizer.param_groups[0]['lr'],
+                        "epoch": epoch_id,
+                        "step": global_step
+                    })
+                
+                # Print loss periodically
+                if global_step % 10 == 0 and accelerator.is_main_process:
+                    print(f"Step {global_step}, Loss: {loss_value:.6f}")
+                
                 model_logger.on_step_end(accelerator, model, save_steps)
                 scheduler.step()
+        
+        # Log epoch average loss
+        avg_epoch_loss = epoch_loss / num_batches if num_batches > 0 else 0.0
+        if accelerator.is_main_process:
+            print(f"Epoch {epoch_id+1}/{num_epochs} completed. Average Loss: {avg_epoch_loss:.6f}")
+            if swanlab_logger:
+                swanlab_logger.log({
+                    "epoch_avg_loss": avg_epoch_loss,
+                    "epoch": epoch_id
+                })
+        
         if save_steps is None:
             model_logger.on_epoch_end(accelerator, model, epoch_id)
+    
     model_logger.on_training_end(accelerator, model, save_steps)
+    
+    # Finish SwanLab logging
+    if swanlab_logger and accelerator.is_main_process:
+        swanlab_logger.finish()
 
 
 def launch_data_process_task(model: DiffusionTrainingModule, dataset, output_path="./models"):
@@ -486,6 +546,17 @@ def wan_parser():
     parser.add_argument("--save_steps", type=int, default=None, help="Number of checkpoint saving invervals. If None, checkpoints will be saved every epoch.")
     parser.add_argument("--dataset_num_workers", type=int, default=0, help="Number of workers for data loading.")
     parser.add_argument("--weight_decay", type=float, default=0.01, help="Weight decay.")
+    parser.add_argument(
+        "--use_swanlab",
+        default=False,
+        action="store_true",
+        help="Whether to use SwanLab logger.",
+    )
+    parser.add_argument(
+        "--swanlab_mode",
+        default=None,
+        help="SwanLab mode (cloud or local).",
+    )
     return parser
 
 
@@ -552,4 +623,15 @@ def qwen_image_parser():
     parser.add_argument("--save_steps", type=int, default=None, help="Number of checkpoint saving invervals. If None, checkpoints will be saved every epoch.")
     parser.add_argument("--dataset_num_workers", type=int, default=0, help="Number of workers for data loading.")
     parser.add_argument("--weight_decay", type=float, default=0.01, help="Weight decay.")
+    parser.add_argument(
+        "--use_swanlab",
+        default=False,
+        action="store_true",
+        help="Whether to use SwanLab logger.",
+    )
+    parser.add_argument(
+        "--swanlab_mode",
+        default=None,
+        help="SwanLab mode (cloud or local).",
+    )
     return parser

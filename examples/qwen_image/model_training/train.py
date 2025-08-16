@@ -134,4 +134,6 @@ if __name__ == "__main__":
         save_steps=args.save_steps,
         find_unused_parameters=args.find_unused_parameters,
         num_workers=args.dataset_num_workers,
+        use_swanlab=args.use_swanlab,
+        swanlab_mode=args.swanlab_mode,
     )
