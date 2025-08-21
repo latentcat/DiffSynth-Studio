@@ -352,6 +352,8 @@ class DiffusionTrainingModule(torch.nn.Module):
             if "lora_A.weight" in key or "lora_B.weight" in key:
                 new_key = key.replace("lora_A.weight", "lora_A.default.weight").replace("lora_B.weight", "lora_B.default.weight")
                 new_state_dict[new_key] = value
+            elif "lora_A.default.weight" in key or "lora_B.default.weight" in key:
+                new_state_dict[key] = value
         return new_state_dict
 
 
@@ -634,4 +636,5 @@ def qwen_image_parser():
         default=None,
         help="SwanLab mode (cloud or local).",
     )
+    parser.add_argument("--processor_path", type=str, default=None, help="Path to the processor. If provided, the processor will be used for image editing.")
     return parser
